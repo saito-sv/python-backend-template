@@ -12,7 +12,7 @@ from antidote import ParameterDependency, inject
 F = TypeVar("F", bound=Callable)
 
 
-def hidden_inject(func: F) -> F:
+def hidden_inject[F: Callable](func: F) -> F:
     """
     A wrapper around antidote's inject that works for FastAPI routers and dependencies
 
