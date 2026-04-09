@@ -29,7 +29,6 @@ class SessionManager:
 def _maybe_abstract_exception(e: Exception) -> Exception:
     """
     Abstract database-specific exceptions to application exceptions.
-    
     This allows swapping database implementations without changing application code.
     """
     if (

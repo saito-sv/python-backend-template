@@ -55,7 +55,7 @@ dev *OPTIONS:
 
 # Start database services
 db:
-    docker-compose up -d database redis rabbitmq
+    docker-compose up -d database
 
 # Stop database services
 db-down:
