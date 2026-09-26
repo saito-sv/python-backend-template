@@ -1,30 +1,39 @@
-"""User API schemas for external API."""
+"""User API schemas (request/response types)."""
 
-from pydantic import BaseModel, EmailStr
+from typing import Annotated, Final
 
-from app.domains.user.models import UserRead
+from pydantic import AfterValidator, BaseModel, Field
+
+from app.utils.schemas import BaseRead, NormalizedEmail
+
+_BCRYPT_MAX_BYTES: Final = 72
 
 
-class UserBase(BaseModel):
-    """Base user schema."""
+def _fits_bcrypt(value: str) -> str:
+    if len(value.encode()) > _BCRYPT_MAX_BYTES:
+        raise ValueError(f"must be at most {_BCRYPT_MAX_BYTES} bytes")
+    return value
 
-    email: EmailStr
+
+# bcrypt only uses the first 72 bytes (and bcrypt>=5 raises beyond that), so cap it here.
+Password = Annotated[str, Field(min_length=8), AfterValidator(_fits_bcrypt)]
+
+
+class UserRead(BaseRead):
+    email: str
+    full_name: str | None
+    is_active: bool
+    is_superuser: bool
+
+
+class UserCreate(BaseModel):
+    email: NormalizedEmail
     full_name: str | None = None
-
-
-class UserCreate(UserBase):
-    """Schema for creating a user via API."""
-
-    password: str
+    password: Password
 
 
 class UserUpdate(BaseModel):
-    """Schema for updating a user via API."""
-
-    email: EmailStr | None = None
+    email: NormalizedEmail | None = None
     full_name: str | None = None
-    password: str | None = None
+    password: Password | None = None
     is_active: bool | None = None
-
-
-__all__ = ["UserBase", "UserCreate", "UserUpdate", "UserRead"]

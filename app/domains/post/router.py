@@ -1,97 +1,64 @@
+"""Post domain router."""
+
 from antidote import inject
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Response, status
 
 from app.di import hidden_inject
-from app.domains.post.schemas import PostCreate, PostResponse, PostUpdate
-from app.domains.post.service import PostService
+from app.routes import RouteConfig
+from app.utils.schemas import CursorPage, CursorParams
 
-router = APIRouter(prefix="/post", tags=["post"])
+from .schemas import PostCreate, PostRead, PostUpdate
+from .service import PostService
+
+router = APIRouter()
 
 
-@router.post("/", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/posts", status_code=status.HTTP_201_CREATED)
 @hidden_inject
 async def create_post(
-    post_data: PostCreate,
-    service: PostService = inject.me(),
-) -> PostResponse:
-    try:
-        post = await service.create_post(post_data)
-        return PostResponse(
-            id=post.id,
-            title=post.title,
-            content=post.content,
-            user_id=post.user_id,
-            created_at=post.created_at.isoformat(),
-            updated_at=post.updated_at.isoformat(),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    data: PostCreate,
+    post_service: PostService = inject.me(),
+) -> PostRead:
+    return await post_service.create_post(data)
 
 
-@router.get("/{post_id}", response_model=PostResponse)
+@router.get("/posts/{post_id}")
 @hidden_inject
 async def get_post(
     post_id: str,
-    service: PostService = inject.me(),
-) -> PostResponse:
-    post = await service.get_post_by_id(post_id)
-    if not post:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
-    return PostResponse(
-        id=post.id,
-        title=post.title,
-        content=post.content,
-        user_id=post.user_id,
-        created_at=post.created_at.isoformat(),
-        updated_at=post.updated_at.isoformat(),
-    )
+    post_service: PostService = inject.me(),
+) -> PostRead:
+    return await post_service.get_post(post_id)
 
 
-@router.get("/user/{user_id}", response_model=list[PostResponse])
+@router.get("/users/{user_id}/posts")
 @hidden_inject
-async def get_posts_by_user(
+async def list_posts_for_user(
     user_id: str,
-    service: PostService = inject.me(),
-) -> list[PostResponse]:
-    posts = await service.get_posts_by_user(user_id)
-    return [
-        PostResponse(
-            id=post.id,
-            title=post.title,
-            content=post.content,
-            user_id=post.user_id,
-            created_at=post.created_at.isoformat(),
-            updated_at=post.updated_at.isoformat(),
-        )
-        for post in posts
-    ]
+    params: CursorParams = Depends(),
+    post_service: PostService = inject.me(),
+) -> CursorPage[PostRead]:
+    return await post_service.list_posts_for_user(user_id, params)
 
 
-@router.patch("/{post_id}", response_model=PostResponse)
+@router.patch("/posts/{post_id}")
 @hidden_inject
 async def update_post(
     post_id: str,
-    post_data: PostUpdate,
-    service: PostService = inject.me(),
-) -> PostResponse:
-    try:
-        post = await service.update_post(post_id, post_data)
-        return PostResponse(
-            id=post.id,
-            title=post.title,
-            content=post.content,
-            user_id=post.user_id,
-            created_at=post.created_at.isoformat(),
-            updated_at=post.updated_at.isoformat(),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    data: PostUpdate,
+    post_service: PostService = inject.me(),
+) -> PostRead:
+    return await post_service.update_post(post_id, data)
 
 
-@router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
 @hidden_inject
 async def delete_post(
     post_id: str,
-    service: PostService = inject.me(),
-) -> None:
-    await service.delete_post(post_id)
+    post_service: PostService = inject.me(),
+) -> Response:
+    await post_service.delete_post(post_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+route_config = RouteConfig(router=router, prefix="", tags=["posts"])

@@ -2,47 +2,41 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.database.engine import AsyncSessionFactory, async_session_factory
-from app.repository.exceptions import DuplicateEntityException
+from app.exc import DuplicateEntityException, ForeignKeyViolationException
+
+
+def map_integrity_error(e: Exception) -> Exception:
+    """Map Postgres integrity errors to database-agnostic application exceptions."""
+    if isinstance(e, IntegrityError) and e.orig is not None and hasattr(e.orig, "pgcode"):
+        pgcode = e.orig.pgcode  # pyright: ignore[reportAttributeAccessIssue]
+        if pgcode == "23505":
+            return DuplicateEntityException(e)
+        if pgcode == "23503":
+            return ForeignKeyViolationException(e)
+    return e
 
 
 class SessionManager:
-    """Manages database sessions with automatic commit and error handling."""
-
     def __init__(self, session_factory: AsyncSessionFactory):
         self.session_factory = session_factory
 
     @asynccontextmanager
-    async def _managed_session(self, *, auto_commit: bool = True):
-        """Context manager for session handling with automatic commit."""
-        async with self.session_factory() as session:
+    async def session(self, *, auto_commit: bool = True):
+        """Yield a session; commit on success, roll back and map errors on failure."""
+        async with self.session_factory() as db_session:
             try:
-                yield session
+                yield db_session
                 if auto_commit:
-                    await session.commit()
+                    await db_session.commit()
             except Exception as e:
-                raise _maybe_abstract_exception(e) from e
+                await db_session.rollback()
+                raise map_integrity_error(e) from e
 
 
-def _maybe_abstract_exception(e: Exception) -> Exception:
-    """
-    Abstract database-specific exceptions to application exceptions.
-    
-    This allows swapping database implementations without changing application code.
-    """
-    if (
-        isinstance(e, IntegrityError)
-        and e.orig is not None
-        and hasattr(e.orig, "pgcode")
-        and e.orig.pgcode == "23505"  # pyright: ignore[reportAttributeAccessIssue]
-    ):
-        return DuplicateEntityException(e)
-    return e
-
-
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Dependency to get database session."""
-    async with async_session_factory() as session:
-        yield session
+async def get_session() -> AsyncGenerator[AsyncSession]:
+    """FastAPI dependency yielding a raw session."""
+    async with async_session_factory() as db_session:
+        yield db_session

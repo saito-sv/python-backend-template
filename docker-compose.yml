@@ -1,4 +1,16 @@
-version: '3.8'
+x-app-env: &app-env
+  DATABASE_HOST: database
+  DATABASE_PORT: 5432
+  DATABASE_NAME: app_db
+  DATABASE_USERNAME: postgres
+  DATABASE_PASSWORD: postgres
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: 5672
+  RABBITMQ_USERNAME: admin
+  RABBITMQ_PASSWORD: mypass
+  TASK_QUEUE_USE_IN_MEMORY_BROKER: "false"
 
 services:
   database:
@@ -41,20 +53,24 @@ services:
       timeout: 5s
       retries: 5
 
+  # Local Grafana stack (same OTLP path as Grafana Cloud): OTel collector -> Tempo, Prometheus
+  # (PromQL) and Loki. OTLP on 4317/4318, Grafana on http://localhost:3000 (anonymous admin).
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles: ["otel"]
+    ports:
+      - "3000:3000"
+      - "4317:4317"
+      - "4318:4318"
+
   api:
     build: .
-    command: uvicorn app.app:app --host 0.0.0.0 --port 8000 --reload
+    profiles: ["app"]
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@database:5432/app_db
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USERNAME: admin
-      RABBITMQ_PASSWORD: mypass
-      TASK_QUEUE_USE_IN_MEMORY_BROKER: "false"
+      <<: *app-env
+      RUN_MIGRATIONS_ON_STARTUP: "true"
     depends_on:
       database:
         condition: service_healthy
@@ -62,22 +78,13 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    volumes:
-      - .:/app
-    working_dir: /app
 
   worker:
     build: .
+    profiles: ["app"]
     command: bash task_queue/start-worker.sh
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@database:5432/app_db
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: 5672
-      RABBITMQ_USERNAME: admin
-      RABBITMQ_PASSWORD: mypass
-      TASK_QUEUE_USE_IN_MEMORY_BROKER: "false"
+      <<: *app-env
     depends_on:
       database:
         condition: service_healthy
@@ -85,9 +92,6 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-    volumes:
-      - .:/app
-    working_dir: /app
 
 volumes:
   postgres_data:

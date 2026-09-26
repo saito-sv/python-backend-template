@@ -1,457 +1,289 @@
 # FastAPI Backend Template
 
-Production-ready FastAPI backend template with modern Python patterns, type safety, and best practices.
+FastAPI backend template with a repository pattern, SQL-first migrations and prefixed ULID ids.
 
-## Features
+## Stack
 
-- **FastAPI** - Modern web framework for building APIs with automatic OpenAPI docs
-- **SQLModel** - Type-safe ORM with Pydantic integration for database models
-- **PostgreSQL** - Relational database
-- **Alembic** - Database migration management
-- **Repository Pattern** - Clean data access layer with composable filters
-- **Object ID Generation** - Prefixed IDs (e.g., `usr_abc123...`)
-- **Antidote** - Dependency injection for testable, maintainable code
-- **TaskIQ** - Background task queue with RabbitMQ/Redis support
-- **Modern Tooling** - uv for package management, ruff for linting/formatting, pyright for type checking
-- **Docker** - Complete development environment with docker-compose
+- **FastAPI** + **SQLModel** (async SQLAlchemy) + **PostgreSQL**
+- **goose** for migrations (plain SQL files in `migrations/`)
+- **Antidote** for dependency injection
+- **TaskIQ** for background tasks (RabbitMQ + Redis, or in-memory for dev)
+- **OpenTelemetry** to the Grafana stack: Tempo (traces), Mimir/Prometheus (metrics), Loki (logs)
+- **`.env`** for configuration (pydantic-settings)
+- **uv**, **ruff**, **pyright**, **just**
 
-## Quick Start
+## Prerequisites
 
-See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
+- [uv](https://docs.astral.sh/uv/)
+- [goose](https://github.com/pressly/goose): `brew install goose` or `go install github.com/pressly/goose/v3/cmd/goose@latest`
+- [Docker](https://www.docker.com/) and [just](https://github.com/casey/just)
+
+## Getting Started
 
 ```bash
-# Install dependencies
 uv sync
-
-# Start services (PostgreSQL, Redis, RabbitMQ)
-docker-compose up -d
-
-# Run migrations
-uv run alembic upgrade head
-
-# Start development server
-just dev
+cp .env.example .env
+just db           # Postgres, Redis, RabbitMQ
+just migrate-up   # apply goose migrations
+just dev          # http://localhost:8000/docs
 ```
 
-Visit http://localhost:8000/docs for interactive API documentation.
+See [QUICKSTART.md](QUICKSTART.md) for example requests.
 
 ## Project Structure
 
 ```
-backend-template/
+.
 ├── app/
-│   ├── app.py                    # FastAPI application setup
-│   ├── exc.py                    # Common exception classes
-│   ├── database/
-│   │   ├── engine.py             # Database connection
-│   │   ├── session.py            # Session management
-│   │   └── model_base.py         # Base models with ID generation
-│   ├── repository/
-│   │   ├── base.py               # Base repository with CRUD operations
-│   │   ├── filter.py             # Filter pattern for composable queries
-│   │   └── exceptions.py         # Repository exceptions
-│   ├── di/
-│   │   └── hidden_inject.py      # DI utilities
-│   └── domains/                  # Business domains (singular names)
-│       └── user/                 # Example user domain
-│           ├── models.py         # Database models
-│           ├── schemas.py        # API request/response schemas
-│           ├── repository.py     # Data access layer
-│           ├── service.py        # Business logic
-│           ├── router.py         # API endpoints
-│           └── tasks.py          # Background tasks
-├── settings/
-│   └── config.py                 # Application configuration
-├── alembic/                      # Database migrations
-├── task_queue/                   # Background job definitions
-├── tests/                        # Test suite
-├── pyproject.toml                # Project dependencies and config
-├── justfile                      # Task automation commands
-└── docker-compose.yml            # Local development services
+│   ├── app.py              # create_app(): middleware, exception handlers, routers
+│   ├── routes.py           # RouteConfig + auto-discovery of domain routers
+│   ├── exc.py              # Exception hierarchy
+│   ├── telemetry.py        # OpenTelemetry setup (traces, metrics, logs)
+│   ├── config/loader.py    # Env-based config modules (APP_, DATABASE_, REDIS_, ...)
+│   ├── database/           # Engine, session manager, model base (ULID ids), DB wait script
+│   ├── repository/         # Base repositories, filters, ILIKE search
+│   ├── di/                 # hidden_inject for FastAPI routes
+│   ├── utils/              # Shared API types (BaseRead, cursor pagination, NormalizedEmail), exception handlers
+│   └── domains/<domain>/
+│       ├── constants.py    # ID prefix and enums (typed Final)
+│       ├── models.py       # Everything touching the DB: table model + repository write shapes
+│       ├── schemas.py      # API types only: request/response models
+│       ├── repository.py   # Data access + filters
+│       ├── service.py      # Business logic
+│       ├── router.py       # Endpoints + `route_config` (auto-registered)
+│       └── tasks.py        # Optional background tasks
+├── migrations/             # goose SQL migrations + env.py (prints GOOSE_DBSTRING)
+├── task_queue/             # TaskIQ broker, @task decorator, worker entry point
+├── justfile, start.sh, Dockerfile, docker-compose.yml
 ```
 
-## Architecture Patterns
+## Key Conventions
 
-### Object ID Generation
+### The database owns the schema
 
-Models use prefixed IDs for better debugging and type safety:
+Tables are created by **goose SQL migrations**, not generated from models. That means:
+
+- Table classes in `models.py` only declare columns and types. Don't put `unique=True`, `index=True`, `nullable=False`, `max_length` or `server_default` on them.
+- Constraints, indexes, defaults, foreign keys and triggers all live in the SQL migration.
+- Request validation such as max length or email format belongs in the API schemas (`schemas.py`).
+- `models.py` is for anything that touches the DB (the table and the shapes the repository writes); `schemas.py` is for API types only and never imports the table.
+- Module-level constants are typed `Final` (e.g. `USER_ID_PREFIX: Final = "usr"`).
 
 ```python
-from app.database.model_base import BaseIDTableModelFactory
+# app/domains/post/models.py
+class PostBase(SQLModel):
+    user_id: str = Field(foreign_key="users.id")  # only needed for ORM joins
+    title: str
+    content: str
 
-ID_PREFIX = "usr"
 
-class User(BaseIDTableModelFactory(ID_PREFIX), table=True):
-    __tablename__ = "user"
-    
-    email: str = Field(unique=True, index=True)
-    full_name: str | None = None
+class Post(PostBase, BaseIDTableModelFactory(POST_ID_PREFIX), table=True):
+    __tablename__ = "posts"
 ```
 
-Generated IDs: `usr_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6`
+### IDs, timestamps and soft delete
 
-### Repository Pattern with Filters
+`BaseIDTableModelFactory(prefix)` adds these fields:
 
-Composable filters for database queries:
+- `id` is a prefixed lowercase ULID, e.g. `usr_01j9z3k6v7f8g9h0j1k2m3n4p5` (stored as `varchar(255)`)
+- `created_at` / `updated_at` are tz-aware (`timestamptz`)
+- `deleted_at` is used for soft delete
+
+Every table needs these columns in its migration, plus the `updated_at` trigger:
+
+```sql
+id          varchar(255) PRIMARY KEY,
+created_at  timestamptz  NOT NULL DEFAULT now(),
+updated_at  timestamptz  NOT NULL DEFAULT now(),
+deleted_at  timestamptz
+```
+
+### Repositories
+
+Repositories extend `MainObjectIdRepository[Create, Read, Update, DB]`:
+
+- The session factory defaults to `app.database.engine.async_session_factory`; pass another to the constructor if needed.
+- Reads exclude soft-deleted rows by default. Pass `include_deleted=True` to include them.
+- `delete_by_id(id)` soft-deletes. Use `delete_by_id(id, hard=True)` for a hard delete.
+- `update()` bumps `updated_at` automatically.
+- `paginate(...)` does keyset pagination on the ULID `id` (see [Pagination](#pagination)).
+- Filters are small dataclasses and can be combined with `and_filter`, `or_filter` and `not_filter`.
 
 ```python
 @dataclass
 class _EmailFilter(DataFilter[User]):
     email: str
-    
+
     @property
     def expression(self) -> Any:
         return User.email == self.email
 
-# Usage
-user = await repo.get_one(repo.email_filter("john@example.com"))
+
+@injectable(lifetime="transient")
+class UserRepository(MainObjectIdRepository[UserDBCreate, UserRead, UserDBUpdate, User]):
+    _db_class = User
+    _read_class = UserRead
+
+    @staticmethod
+    def email_filter(email: str) -> DataFilter[User]:
+        return _EmailFilter(email)
 ```
 
-Combine filters for complex queries:
+### Services and routers
 
 ```python
-users = await repo.get_all(
-    repo.is_active_filter(True),
-    repo.email_search_filter("john"),
-)
-```
-
-### Domain-Driven Design
-
-Each domain follows a layered architecture:
-
-```
-domains/user/
-├── models.py       # Database entities (SQLModel)
-├── schemas.py      # API contracts (Pydantic)
-├── repository.py   # Data access with filters
-├── service.py      # Business logic
-├── router.py       # HTTP endpoints
-└── tasks.py        # Background tasks
-```
-
-### Dependency Injection
-
-Services use Antidote for dependency injection:
-
-```python
-from dataclasses import dataclass
-from antidote import injectable
-from app.domains.user.repository import UserRepository
-
 @injectable
-@dataclass
-class UserService:
-    repository: UserRepository
-    
-    async def create_user(self, user_data: UserCreate) -> UserRead:
-        return await self.repository.create(user_data)
+class PostService:
+    @inject
+    def __init__(self, post_repo: PostRepository = inject.me()) -> None:
+        self._post_repo = post_repo
 ```
 
-### Background Tasks
-
-TaskIQ for async background job processing:
+Each `router.py` exposes a module-level `route_config`. `app/routes.py` discovers them automatically and mounts them under `/v1`; there is no list to update.
 
 ```python
-from task_queue import task
-from app.database.engine import async_session_factory
-from app.domains.user.repository import UserRepository
+router = APIRouter()
 
-@task
-async def send_welcome_email(user_id: str) -> None:
-    async with async_session_factory() as session:
-        repository = UserRepository(session_factory=async_session_factory)
-        user = await repository.get_by_id(user_id)
-        # Send email logic
+@router.get("/posts/{post_id}")
+@hidden_inject
+async def get_post(post_id: str, post_service: PostService = inject.me()) -> PostRead:
+    return await post_service.get_post(post_id)
+
+route_config = RouteConfig(router=router, prefix="", tags=["posts"])
 ```
 
-Enqueue tasks:
+Raise exceptions from `app.exc` such as `EntityNotFoundException` (404) or `EntityExistsException` (409) and the default handlers return the right status. Unique and foreign key violations from Postgres come back as 409.
 
-```python
-await send_welcome_email.kiq(user_id="usr_123...")
-```
+## Migrations
 
-## Development
-
-### Available Commands
+`migrations/env.py` builds `GOOSE_DBSTRING` from the `DATABASE_*` settings.
 
 ```bash
-just install          # Install dependencies
-just dev              # Start development server
-just test             # Run all tests
-just lint             # Run ruff linter
-just format           # Format code with ruff
-just db               # Start database services
-just migrate-gen "msg" # Create new migration
-just migrate-up       # Apply migrations
-just migrate-down     # Rollback last migration
+just migrate-gen add_comments_table   # creates migrations/<timestamp>_add_comments_table.sql
+just migrate-up                       # apply pending migrations
+just migrate-down                     # roll back the last migration
+just migrate-status
 ```
 
-### Database Migrations
+`start.sh` runs `goose up` on startup unless `RUN_MIGRATIONS_ON_STARTUP=false`.
 
-Development workflow:
+## Adding a Domain
 
-```bash
-# Create migration after modifying models
-just migrate-gen "add user table"
-
-# Apply migrations
-just migrate-up
-
-# Rollback if needed
-just migrate-down
-```
-
-Production workflow:
-
-Set `RUN_MIGRATIONS_ON_STARTUP=true` to automatically run migrations on application startup.
-
-### Code Quality
-
-```bash
-# Format code
-just format
-
-# Check linting
-just lint
-
-# Type checking
-uv run pyright .
-```
-
-## Creating a New Domain
-
-1. Create domain directory:
-   ```bash
-   mkdir -p app/domains/product
-   ```
-
-2. Define the model (`models.py`):
-   ```python
-   from sqlmodel import Field, SQLModel
-   from app.database.model_base import BaseIDTableModelFactory, BaseRead
-   
-   ID_PREFIX = "prd"
-   
-   class ProductBase(SQLModel):
-       name: str
-       price: int
-       description: str | None = None
-   
-   class Product(ProductBase, BaseIDTableModelFactory(ID_PREFIX), table=True):
-       __tablename__ = "products"
-       name: str = Field(index=True, nullable=False)
-       price: int = Field(nullable=False)
-   
-   class ProductCreate(ProductBase):
-       pass
-   
-   class ProductUpdate(SQLModel):
-       name: str | None = None
-       price: int | None = None
-       description: str | None = None
-   
-   class ProductRead(ProductBase, BaseRead):
-       pass
-   ```
-
-3. Create repository (`repository.py`):
-   ```python
-   from dataclasses import dataclass
-   from typing import Any
-   from antidote import injectable
-   from app.repository.base import MainObjectIdRepository
-   from app.repository.filter import DataFilter
-   from .models import Product, ProductCreate, ProductRead, ProductUpdate
-   
-   @dataclass
-   class _NameFilter(DataFilter[Product]):
-       name: str
-       
-       @property
-       def expression(self) -> Any:
-           return Product.name == self.name
-   
-   @injectable(lifetime="transient")
-   class ProductRepository(MainObjectIdRepository[ProductCreate, ProductRead, ProductUpdate, Product]):
-       _db_class = Product
-       _read_class = ProductRead
-       
-       @classmethod
-       def name_filter(cls, name: str) -> _NameFilter:
-           return _NameFilter(name=name)
-   ```
-
-4. Create service (`service.py`):
-   ```python
-   from dataclasses import dataclass
-   from antidote import injectable
-   from .repository import ProductRepository
-   from .models import ProductCreate, ProductRead
-   
-   @injectable
-   @dataclass
-   class ProductService:
-       repository: ProductRepository
-       
-       async def create_product(self, data: ProductCreate) -> ProductRead:
-           return await self.repository.create(data)
-   ```
-
-5. Create router (`router.py`):
-   ```python
-   from fastapi import APIRouter
-   from antidote import inject
-   from app.di import hidden_inject
-   from .service import ProductService
-   from .models import ProductCreate, ProductRead
-   
-   router = APIRouter(prefix="/products", tags=["products"])
-   
-   @router.post("/", response_model=ProductRead)
-   @hidden_inject
-   async def create_product(
-       data: ProductCreate,
-       service: ProductService = inject.me(),
-   ) -> ProductRead:
-       return await service.create_product(data)
-   ```
-
-6. Register router in `app/routes.py`:
-   ```python
-   from app.domains.product.router import router as product_router
-   
-   def register_routes(app: FastAPI) -> None:
-       app.include_router(product_router)
-   ```
-
-7. Create migration:
-   ```bash
-   just migrate-gen "add product table"
-   just migrate-up
-   ```
-
-## Testing
-
-```bash
-# Run all tests
-just test
-
-# Run with coverage
-uv run pytest --cov=app --cov-report=html
-
-# Run specific test file
-uv run pytest tests/unit/test_user.py
-```
-
-## Docker
-
-### Development
-
-```bash
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f api
-docker-compose logs -f worker
-
-# Stop services
-docker-compose down
-```
-
-Services included:
-- **database** - PostgreSQL 16
-- **redis** - Redis 7
-- **rabbitmq** - RabbitMQ 3 with management UI
-- **api** - FastAPI application server
-- **worker** - TaskIQ worker process
-
-### Production Deployment
-
-Run two separate services:
-
-1. **API Server** - Handles HTTP requests
-2. **Worker Process** - Processes background tasks
-
-Environment configuration:
-
-```bash
-# Application
-ENVIRONMENT=production
-DEBUG=false
-
-# Database
-DATABASE_URL=postgresql+asyncpg://user:pass@db-host:5432/dbname
-
-# Redis
-REDIS_HOST=redis-host
-REDIS_PORT=6379
-
-# RabbitMQ
-RABBITMQ_HOST=rabbitmq-host
-RABBITMQ_PORT=5672
-RABBITMQ_USERNAME=admin
-RABBITMQ_PASSWORD=password
-
-# Task Queue
-TASK_QUEUE_USE_IN_MEMORY_BROKER=false
-```
-
-Docker deployment:
-
-```bash
-# Build image
-docker build -t my-api:latest .
-
-# Run API server
-docker run -d \
-  --name api \
-  -p 8000:8000 \
-  --env-file .env.production \
-  my-api:latest \
-  uvicorn app.app:app --host 0.0.0.0 --port 8000
-
-# Run worker process
-docker run -d \
-  --name worker \
-  --env-file .env.production \
-  my-api:latest \
-  bash task_queue/start-worker.sh
-```
+1. `just migrate-gen create_<things>_table`, then write the SQL (base columns + `updated_at` trigger), then run `just migrate-up`.
+2. Create `app/domains/<thing>/` with `constants.py`, `models.py`, `schemas.py`, `repository.py`, `service.py` and `router.py` (with `route_config`).
+3. You're done. The router is picked up automatically.
 
 ## Configuration
 
-Configuration via environment variables and `settings/config.py`:
+All settings come from environment variables, with `.env` as the fallback. See `.env.example`.
 
-```python
-from pydantic_settings import BaseSettings
+| Prefix | Module | Notes |
+|---|---|---|
+| `APP_` | `AppConfig` | name, host, port, environment, debug, CORS |
+| `DATABASE_` | `DatabaseConfig` | host, port, name, username, password, echo |
+| `REDIS_` | `RedisConfig` | task result backend |
+| `RABBITMQ_` | `RabbitMQConfig` | task broker |
+| `TASK_QUEUE_` | `TaskQueueConfig` | `USE_IN_MEMORY_BROKER=true` for local dev |
+| `OTEL_` | `TelemetryConfig` | `ENABLED`, `SERVICE_NAME`, `SERVICE_NAMESPACE`, `LOG_LEVEL`, `CONSOLE_EXPORTER` |
 
-class Settings(BaseSettings):
-    database_url: str
-    secret_key: str
-    redis_url: str = "redis://localhost:6379"
-    
-    class Config:
-        env_file = ".env"
+In code, load only the modules you need: `load("database")`.
+
+## Pagination
+
+List endpoints use cursor (keyset) pagination on the id. Ids are ULIDs, so they sort by
+creation time, and each page is a primary-key range scan however deep you go. Offsets and
+total counts are deliberately not offered.
+
+```
+GET /v1/users?limit=50&order=desc
+→ {"items": [...], "next_cursor": "usr_01j9z3k6v7f8g9h0j1k2m3n4p5"}
+
+GET /v1/users?limit=50&order=desc&cursor=usr_01j9z3k6v7f8g9h0j1k2m3n4p5
+→ {"items": [...], "next_cursor": null}   # last page
 ```
 
-Required environment variables:
-- `DATABASE_URL` - PostgreSQL connection string
-- `SECRET_KEY` - Secret key for JWT tokens
+In a domain, accept `params: CursorParams = Depends()`, return `CursorPage[ReadModel]`, and
+call `repo.paginate(*filters, cursor=params.cursor, limit=params.limit, order=params.order)`.
 
-## Key Technologies
+## Observability
 
-- **[FastAPI](https://fastapi.tiangolo.com/)** - Web framework
-- **[SQLModel](https://sqlmodel.tiangelo.com/)** - SQL databases with Python type annotations
-- **[Alembic](https://alembic.sqlalchemy.org/)** - Database migration tool
-- **[Pydantic](https://docs.pydantic.dev/)** - Data validation
-- **[Antidote](https://antidote.readthedocs.io/)** - Dependency injection framework
-- **[TaskIQ](https://taskiq-python.github.io/)** - Distributed task queue
-- **[uv](https://github.com/astral-sh/uv)** - Python package installer
-- **[ruff](https://github.com/astral-sh/ruff)** - Python linter and formatter
-- **[pyright](https://github.com/microsoft/pyright)** - Static type checker
+OpenTelemetry is set up in `app/telemetry.py` and is off by default (`OTEL_ENABLED=false`).
+It targets the Grafana stack: the API and the worker send all three signals over OTLP/HTTP to
+one endpoint, which routes them to the right backend.
 
-## License
+| Signal | Backend | Query language | What you get |
+|---|---|---|---|
+| Traces | Tempo | TraceQL | a span per request, a child span per SQL statement, task spans in the enqueuing request's trace |
+| Metrics | Mimir / Prometheus | PromQL | `http_server_request_duration_seconds` (by `http_route`, `http_request_method`, `http_response_status_code`), active requests, DB pool usage |
+| Logs | Loki | LogQL | every `logging` record, with `trace_id`/`span_id` so Grafana links a log line to its trace |
 
-MIT License
+Every signal carries `service.name`, `service.namespace`, `service.version` and
+`deployment.environment` (from `APP_ENVIRONMENT`). Grafana builds the Prometheus `job` label as
+`<namespace>/<name>`. HTTP metrics use the stable OTel semantic conventions, the names Grafana
+dashboards and Application Observability expect.
+
+### Grafana Cloud
+
+In your stack go to **Details → OpenTelemetry**, create a token with metrics, logs and traces
+write scopes, then set:
+
+```bash
+OTEL_ENABLED=true
+OTEL_SERVICE_NAME=my-api
+OTEL_SERVICE_NAMESPACE=my-team
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-<region>.grafana.net/otlp
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic%20<base64 of instanceId:token>
+```
+
+If you run Grafana Alloy (or any OTel collector) as a sidecar or agent, point
+`OTEL_EXPORTER_OTLP_ENDPOINT` at it instead and keep the credentials in the collector.
+
+### Locally
+
+```bash
+just otel                  # grafana/otel-lgtm: Grafana at http://localhost:3000
+OTEL_ENABLED=true just dev
+```
+
+`grafana/otel-lgtm` runs the same pipeline (OTel collector → Tempo, Prometheus, Loki) with the
+data sources and trace↔log links already wired. For a quick look with no collector, use
+`OTEL_ENABLED=true OTEL_CONSOLE_EXPORTER=true just dev`.
+
+Stdout logs always include `trace_id`/`span_id`, even with OTel off. Other standard variables
+work as usual: `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`,
+and `OTEL_{TRACES,METRICS,LOGS}_EXPORTER=none` to turn a signal off.
+
+Custom spans:
+
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+with tracer.start_as_current_span("charge_card") as span:
+    span.set_attribute("user.id", user_id)
+    ...
+```
+
+## Background Tasks
+
+```python
+@task
+@inject
+async def send_welcome_email(user_id: str, user_service: UserService = inject.me()) -> None:
+    ...
+
+await send_welcome_email.kiq(user_id="usr_...")
+```
+
+Start a worker with `just task-worker`.
+
+## Docker
+
+```bash
+docker compose up -d                         # infra only
+docker compose --profile app up -d --build   # + api and worker
+```
+
+The image includes goose, so the API container applies migrations on startup.
+

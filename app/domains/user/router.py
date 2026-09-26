@@ -1,73 +1,63 @@
-"""User API routes."""
+"""User domain router."""
 
 from antidote import inject
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Response, status
 
 from app.di import hidden_inject
-from app.domains.user.schemas import UserCreate, UserRead, UserUpdate
-from app.domains.user.service import UserService
+from app.routes import RouteConfig
+from app.utils.schemas import CursorPage, CursorParams
 
-router = APIRouter(prefix="/user", tags=["user"])
+from .schemas import UserCreate, UserRead, UserUpdate
+from .service import UserService
+
+router = APIRouter()
 
 
-@router.post("/", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 @hidden_inject
 async def create_user(
-    user_data: UserCreate,
-    service: UserService = inject.me(),
+    data: UserCreate,
+    user_service: UserService = inject.me(),
 ) -> UserRead:
-    """Create a new user."""
-    try:
-        return await service.create_user(user_data)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    return await user_service.create_user(data)
 
 
-@router.get("/{user_id}", response_model=UserRead)
+@router.get("")
+@hidden_inject
+async def list_users(
+    params: CursorParams = Depends(),
+    user_service: UserService = inject.me(),
+) -> CursorPage[UserRead]:
+    return await user_service.list_users(params)
+
+
+@router.get("/{user_id}")
 @hidden_inject
 async def get_user(
     user_id: str,
-    service: UserService = inject.me(),
+    user_service: UserService = inject.me(),
 ) -> UserRead:
-    """Get a user by ID."""
-    user = await service.get_user(user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    return user
+    return await user_service.get_user(user_id)
 
 
-@router.get("/", response_model=list[UserRead])
-@hidden_inject
-async def list_users(
-    skip: int = 0,
-    limit: int = 100,
-    service: UserService = inject.me(),
-) -> list[UserRead]:
-    """List all users with pagination."""
-    return await service.get_users(skip=skip, limit=limit)
-
-
-@router.patch("/{user_id}", response_model=UserRead)
+@router.patch("/{user_id}")
 @hidden_inject
 async def update_user(
     user_id: str,
-    user_data: UserUpdate,
-    service: UserService = inject.me(),
+    data: UserUpdate,
+    user_service: UserService = inject.me(),
 ) -> UserRead:
-    """Update a user."""
-    user = await service.update_user(user_id, user_data)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    return user
+    return await user_service.update_user(user_id, data)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 @hidden_inject
 async def delete_user(
     user_id: str,
-    service: UserService = inject.me(),
-) -> None:
-    """Delete a user."""
-    success = await service.delete_user(user_id)
-    if not success:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user_service: UserService = inject.me(),
+) -> Response:
+    await user_service.delete_user(user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+route_config = RouteConfig(router=router, prefix="/users", tags=["users"])

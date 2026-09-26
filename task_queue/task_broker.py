@@ -1,33 +1,41 @@
-from taskiq import AsyncBroker, InMemoryBroker
-from taskiq.serializers import ORJSONSerializer
-from taskiq_aio_pika import AioPikaBroker
-from taskiq_redis import RedisAsyncResultBackend
+from app.telemetry import setup_telemetry
 
-from settings.rabbitmq import RABBITMQ_SETTINGS
-from settings.redis import REDIS_SETTINGS
-from task_queue.settings import TASK_QUEUE_SETTINGS
+# The worker imports this module first, so telemetry is configured before tasks run.
+setup_telemetry()
+
+from taskiq import AsyncBroker, InMemoryBroker  # noqa: E402
+from taskiq.middlewares.opentelemetry_middleware import OpenTelemetryMiddleware  # noqa: E402
+from taskiq.serializers import ORJSONSerializer  # noqa: E402
+from taskiq_aio_pika import AioPikaBroker  # noqa: E402
+from taskiq_redis import RedisAsyncResultBackend  # noqa: E402
+
+from app.config import load  # noqa: E402
+
+_cfg = load("task_queue", "redis", "rabbitmq", "telemetry")
 
 
 def _create_production_broker() -> AsyncBroker:
-    result_backend = RedisAsyncResultBackend(REDIS_SETTINGS.url)
+    result_backend = RedisAsyncResultBackend(_cfg.redis.url)
 
-    broker = AioPikaBroker(
-        url=RABBITMQ_SETTINGS.url,
-        exchange_name=RABBITMQ_SETTINGS.exchange_name,
-        queue_name=RABBITMQ_SETTINGS.queue_name,
+    return AioPikaBroker(
+        url=_cfg.rabbitmq.url,
+        exchange_name=_cfg.rabbitmq.exchange_name,
+        queue_name=_cfg.rabbitmq.queue_name,
         declare_exchange=True,
     ).with_result_backend(result_backend)
 
-    return broker
-
 
 def _create_broker() -> AsyncBroker:
-    if TASK_QUEUE_SETTINGS.use_in_memory_broker:
+    if _cfg.task_queue.use_in_memory_broker:
         base_broker = InMemoryBroker()
     else:
         base_broker = _create_production_broker()
 
-    return base_broker.with_serializer(ORJSONSerializer())
+    broker = base_broker.with_serializer(ORJSONSerializer())
+    if _cfg.telemetry.enabled:
+        # Propagates trace context from the enqueuing request into the task's span.
+        broker = broker.with_middlewares(OpenTelemetryMiddleware())
+    return broker
 
 
 broker = _create_broker()

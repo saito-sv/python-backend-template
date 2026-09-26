@@ -1,12 +1,15 @@
-"""TaskIQ worker entry point.
+"""TaskIQ worker entry point (``taskiq worker task_queue.worker:broker``)."""
 
-This module is used by the TaskIQ CLI to start worker processes.
-The broker is imported here so it's available as 'broker' for the CLI.
+from taskiq import TaskiqEvents, TaskiqState
 
-Usage:
-    uv run python -m taskiq worker task_queue.worker:broker -tp "app/**/tasks.py"
-"""
-
+from app.telemetry import shutdown_telemetry
 from task_queue.task_broker import broker
+
+
+@broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
+async def _flush_telemetry(_: TaskiqState) -> None:
+    # Spans are batched; flush them so the last tasks before a deploy aren't lost.
+    shutdown_telemetry()
+
 
 __all__ = ["broker"]

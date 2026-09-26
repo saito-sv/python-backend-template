@@ -1,50 +1,37 @@
-"""
-A wrapper around antidote's inject that works for FastAPI routers and dependencies
+"""Antidote injection for FastAPI route handlers.
+
+FastAPI would treat ``inject.me()`` defaults as request parameters. ``@hidden_inject``
+removes injected parameters from the visible signature while antidote still resolves
+them at call time. Async handlers only.
+
+    @router.get("/items")
+    @hidden_inject
+    async def list_items(service: ItemService = inject.me()) -> list[ItemRead]: ...
 """
 
+import functools
 import inspect
 from collections.abc import Callable
-from functools import wraps
-from typing import TypeVar
+from typing import Any
 
-from antidote import ParameterDependency, inject
-
-F = TypeVar("F", bound=Callable)
+from antidote import ParameterDependency, inject, world
 
 
-def hidden_inject(func: F) -> F:
-    """
-    A wrapper around antidote's inject that works for FastAPI routers and dependencies
+def hidden_inject[F: Callable](func: F) -> F:
+    if not inspect.iscoroutinefunction(func):
+        name = getattr(func, "__name__", repr(func))
+        raise TypeError(f"@hidden_inject requires an async function; '{name}' is sync.")
 
-    This works by modifying the function's revealed signature at runtime to exclude the injected parameters.
-    It does not actually affect the behavior of the function other than injecting: you can still manually
-    pass the parameters. Those parameters will just be hidden from any tool that tries to examine type
-    annotations at runtime, such as FastAPI.
+    injected = inject(func, app_catalog=world)
 
-    It is still preferred to use the native inject if possible. Only use this for FastAPI routers and dependencies.
-    """
-    injected_func = inject(func)
+    signature = inspect.signature(func)
+    visible_params = [
+        p for p in signature.parameters.values() if not isinstance(p.default, ParameterDependency)
+    ]
 
-    @wraps(injected_func)
-    async def async_wrapper(*args, **kwargs):
-        return await injected_func(*args, **kwargs)
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return await injected(*args, **kwargs)
 
-    @wraps(injected_func)
-    def sync_wrapper(*args, **kwargs):
-        return injected_func(*args, **kwargs)
-
-    wrapper = async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
-
-    # Filter out injected parameters
-    non_injected_params = {
-        k: v
-        for k, v in inspect.signature(func).parameters.items()
-        if not isinstance(v.default, ParameterDependency)
-    }
-
-    # Update the wrapper function's signature
-    wrapper.__signature__ = inspect.Signature(  # type: ignore[attr-defined]
-        parameters=list(non_injected_params.values())
-    )
-
+    wrapper.__signature__ = signature.replace(parameters=visible_params)  # type: ignore[attr-defined]
     return wrapper  # type: ignore[return-value]

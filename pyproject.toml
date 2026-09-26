@@ -1,48 +1,44 @@
 [project]
 name = "backend-template"
 version = "0.1.0"
-requires-python = ">=3.12"
-description = "FastAPI backend template with dependency injection"
+description = "FastAPI backend template (SQLModel + goose)"
 readme = "README.md"
+requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.32.0",
-    "sqlmodel>=0.0.22",
-    "alembic>=1.13.0",
-    "asyncpg>=0.29.0",
-    "greenlet>=3.0.0",
-    "pydantic>=2.9.0",
-    "pydantic-settings>=2.5.0",
-    "antidote>=1.4.0",
-    "taskiq[reload]>=0.11.0",
-    "taskiq-aio-pika>=0.4.0",
-    "taskiq-redis>=1.0.0",
-    "redis>=5.0.0",
-    "python-multipart>=0.0.12",
-    "email-validator>=2.2.0",
-    "passlib[bcrypt]>=1.7.4",
-    "python-jose[cryptography]>=3.3.0",
-    "fastapi-pagination>=0.12.0",
-    "orjson>=3.11.6",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "sqlmodel>=0.0.22",
+  "asyncpg>=0.29.0",
+  "greenlet>=3.0.0",
+  "pydantic[email]>=2.9.0",
+  "pydantic-settings>=2.5.0",
+  "python-ulid>=3.0.0",
+  "antidote>=2.0,<3",
+  "bcrypt>=4.2.0",
+  "taskiq[opentelemetry,reload]>=0.11.0",
+  "taskiq-aio-pika>=0.4.0",
+  "taskiq-redis>=1.0.0",
+  "orjson>=3.11.6",
+  "opentelemetry-sdk>=1.38.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.38.0",
+  "opentelemetry-instrumentation-fastapi>=0.59b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.59b0",
+  "opentelemetry-instrumentation-logging>=0.59b0",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
-    "pytest-cov>=6.0.0",
-    "pytest-mock>=3.14.0",
-    "httpx>=0.27.0",
-    "ruff>=0.7.0",
-    "pyright>=1.1.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "pytest-cov>=6.0.0",
+  "httpx>=0.27.0",
+  "ruff>=0.7.0",
+  "pyright>=1.1.0",
 ]
-
-[tool.uv]
-dev-dependencies = []
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = [
@@ -65,15 +61,14 @@ ignore = [
 "tests/**/*.py" = ["B011"]  # assert False
 
 [tool.pyright]
-pythonVersion = "3.12"
+pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false
 exclude = [
     "**/__pycache__",
     "**/node_modules",
-    ".venv",
-    "alembic/versions",
+    "**/.venv",
 ]
 
 [tool.pytest.ini_options]
@@ -82,6 +77,8 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 addopts = [
     "-v",
     "--strict-markers",
@@ -97,4 +94,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["app", "settings"]
+packages = ["app", "task_queue"]

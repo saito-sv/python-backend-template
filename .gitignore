@@ -62,8 +62,9 @@ Thumbs.db
 # Pyright
 .pyright/
 
-# Alembic
-alembic/versions/*.pyc
+# Local config
+.env.*
+!.env.example
 
 # Docker
 docker-compose.override.yml

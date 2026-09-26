@@ -1,16 +1,15 @@
 set fallback := true
+set dotenv-load := true
 
 run := "uv run --"
 
-# Default: run format, lint, and test
+# Default: format, lint, test
 default:
     #!/usr/bin/env bash
     exit_code=0
-
     just format || ((exit_code++))
     just lint || ((exit_code++))
     just test || ((exit_code++))
-
     exit $exit_code
 
 # Install dependencies
@@ -24,86 +23,83 @@ format *FILES='.':
 
 # Lint code
 lint *FILES='.':
-    {{run}} ruff check --fix {{FILES}}
+    {{run}} ruff check {{FILES}}
     {{run}} ruff format --check {{FILES}}
     {{run}} pyright {{FILES}}
 
-# Apply unsafe fixes (use with caution)
-unsafe-fix:
-    {{run}} ruff check --fix --unsafe-fixes .
-    {{run}} ruff format .
-
-# Run all tests
-test:
-    {{run}} pytest
+# Run all tests (integration tests need `just db && just migrate-up`)
+test *ARGS:
+    {{run}} pytest {{ARGS}}
 
 # Run unit tests only
 test-unit:
-    {{run}} pytest tests/unit -v
+    {{run}} pytest tests/unit
 
 # Run integration tests only
 test-integration:
-    {{run}} pytest tests/integration -v
+    {{run}} pytest tests/integration
 
 # Run tests with coverage
 test-cov:
     {{run}} pytest --cov=app --cov-report=html --cov-report=term
 
-# Start development server
-dev *OPTIONS:
-    ./start.sh {{OPTIONS}}
+# Start dev server (starts DB first)
+dev:
+    just db
+    ./start.sh
 
 # Start database services
 db:
-    docker-compose up -d database redis rabbitmq
+    docker compose up -d --wait database redis rabbitmq
+
+# Start the local Grafana stack (Tempo, Prometheus, Loki) at http://localhost:3000; set OTEL_ENABLED=true
+otel:
+    docker compose --profile otel up -d otel-lgtm
 
 # Stop database services
 db-down:
-    docker-compose down
+    docker compose down
 
-# Create a new migration (autogenerate from models)
-migrate-gen MESSAGE:
-    {{run}} alembic revision --autogenerate -m "{{MESSAGE}}"
-    just format alembic/versions
+# Destroy database (removes volumes)
+destroy-db:
+    docker compose down -v
+
+# Reset database
+reset-db:
+    just destroy-db
+    just db
+    just migrate-up
 
 # Apply migrations
 migrate-up:
-    {{run}} alembic upgrade head
-
-# Rollback migrations
-migrate-down STEPS="-1":
-    {{run}} alembic downgrade {{STEPS}}
-
-# Redo a migration (rollback, delete, regenerate, apply)
-migrate-redo MESSAGE:
     #!/usr/bin/env bash
-    set -eou pipefail
-    snake_case_message=$(echo "{{MESSAGE}}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
-    file=alembic/versions/*${snake_case_message}.py
-    if [ -f $file ]; then
-        down_revision=$(grep 'down_revision' $file | sed -r 's/.*down_revision.*=.*"(.*)".*/\1/')
-        if [[ "$down_revision" != "None" ]]; then
-            just migrate-down $down_revision
-        else
-            just migrate-down base
-        fi
-        rm $file
-    fi
-    just migrate-gen "{{MESSAGE}}"
-    just migrate-up
+    set -euo pipefail
+    export GOOSE_DBSTRING="$(uv run --quiet -- python migrations/env.py)"
+    goose -dir migrations postgres up
 
-# Reset database (down and up)
-reset-db:
-    just db-down
-    just db
-    sleep 3
-    just migrate-up
+# Rollback last migration
+migrate-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export GOOSE_DBSTRING="$(uv run --quiet -- python migrations/env.py)"
+    goose -dir migrations postgres down
+
+# Show migration status
+migrate-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export GOOSE_DBSTRING="$(uv run --quiet -- python migrations/env.py)"
+    goose -dir migrations postgres status
+
+# Create a new migration file
+migrate-gen NAME:
+    goose -dir migrations create {{NAME}} sql
 
 # Start task worker
 task-worker:
-    {{run}} taskiq worker app.tasks:broker
+    bash task_queue/start-worker.sh
 
-# Clean up cache and build artifacts
+# Clean up cache
 clean:
     find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
     find . -type f -name "*.pyc" -delete

@@ -1,135 +1,79 @@
-"""Base model classes for database models."""
+"""Base classes for table models: prefixed ULID ids, timestamps and soft delete.
 
-import random
+Column constraints and defaults are defined in the goose migrations, not here.
+"""
+
 from collections.abc import Callable
 from datetime import UTC, datetime
-from string import ascii_lowercase, digits
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
+from sqlalchemy import DateTime
 from sqlmodel import Field, SQLModel
+from ulid import ULID
 
-from app.utils.schemas import DatetimeSerializeAsUTC
-
-_id_char_length = 32
-
-
-def _random_id_string(length: int) -> str:
-    """Generate a random string of lowercase letters and digits."""
-    return "".join(random.choice(ascii_lowercase + digits) for _ in range(length))
+_ULID_CHAR_LENGTH: Final = 26
 
 
-def random_object_id_factory(prefix: str, length: int = _id_char_length) -> Callable[[], str]:
-    """Create a factory function that generates random object IDs with a prefix.
+def random_object_id_factory(prefix: str) -> Callable[[], str]:
+    """Return a factory producing ids like ``usr_01j9z3k6v7f8g9h0j1k2m3n4p5``."""
 
-    Args:
-        prefix: The prefix for the ID (e.g., "usr", "prd")
-        length: The length of the random string portion (default: 32)
+    def object_id() -> str:
+        return f"{prefix}_{str(ULID()).lower()}"
 
-    Returns:
-        A factory function that generates IDs like "usr_abc123..."
-    """
-
-    def random_object_id() -> str:
-        return f"{prefix}_{_random_id_string(length)}"
-
-    return random_object_id
+    return object_id
 
 
-def naive_utcnow() -> datetime:
-    """Get current UTC time as naive datetime."""
-    return datetime.now(UTC).replace(tzinfo=None)
+def utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
-def DateNowField() -> Any:
-    """Create a Field with current UTC timestamp as default."""
-    return Field(
-        default_factory=naive_utcnow,
-        nullable=False,
-        sa_column_kwargs={"server_default": "now()"},
-    )
+_TIMESTAMPTZ: Final[Any] = DateTime(timezone=True)
+
+
+def _TimestampField(default_now: bool) -> Any:
+    if default_now:
+        return Field(default_factory=utcnow, sa_type=_TIMESTAMPTZ)
+    return Field(default=None, sa_type=_TIMESTAMPTZ)
 
 
 class CreatedAtMixin(SQLModel):
-    """Mixin for created_at timestamp."""
-
-    created_at: DatetimeSerializeAsUTC = DateNowField()
+    created_at: datetime = _TimestampField(default_now=True)
 
 
 class UpdatedAtMixin(SQLModel):
-    """Mixin for updated_at timestamp."""
-
-    updated_at: DatetimeSerializeAsUTC = DateNowField()
+    updated_at: datetime = _TimestampField(default_now=True)
 
 
-class BaseSQLModel(CreatedAtMixin, UpdatedAtMixin, SQLModel):
-    """Base model with created_at and updated_at timestamps."""
+class DeletedAtMixin(SQLModel):
+    deleted_at: datetime | None = _TimestampField(default_now=False)
 
+
+class BaseSQLModel(CreatedAtMixin, UpdatedAtMixin, DeletedAtMixin, SQLModel):
     pass
 
 
 class BaseObjectIdSQLModel(BaseSQLModel):
-    """Base model with object ID.
-
-    Note: For typing purposes, use BaseIDTableModelFactory for subclassing.
-    """
-
     id: str | None
 
 
-_observed_prefixes: set[str] = set()
-
-
 def IDTableModelMixinFactory(prefix: str) -> type[SQLModel]:
-    """Create a mixin class that adds an ID field with the given prefix.
-
-    Args:
-        prefix: The prefix for the ID (e.g., "usr", "prd")
-
-    Returns:
-        A mixin class with an ID field
-
-    Raises:
-        ValueError: If the prefix has already been used
-    """
-    global _observed_prefixes
-    if prefix in _observed_prefixes:
-        raise ValueError(
-            f"Prefix {prefix} already observed. Did you choose a unique prefix for "
-            + "IDTableModelMixinFactory/BaseIDTableModelFactory?"
-        )
-    _observed_prefixes.add(prefix)
-
     class IDTableModelMixin(SQLModel):
         _prefix: ClassVar[str] = prefix
         id: str | None = Field(
             default_factory=random_object_id_factory(prefix),
             primary_key=True,
-            nullable=False,
-            regex=f"^{prefix}_[a-z0-9]{{{_id_char_length}}}$",
+            regex=f"^{prefix}_[0-9a-z]{{{_ULID_CHAR_LENGTH}}}$",
         )
 
     return IDTableModelMixin
 
 
 def BaseIDTableModelFactory(prefix: str) -> type[BaseObjectIdSQLModel]:
-    """Create a base model class with ID, created_at, and updated_at fields.
-
-    This is the recommended way to create domain models.
-
-    Args:
-        prefix: The prefix for the ID (e.g., "usr", "prd")
-
-    Returns:
-        A base model class that can be used for table inheritance
+    """Base for table models: ``id``, ``created_at``, ``updated_at`` and ``deleted_at``.
 
     Example:
-        ```python
-        ID_PREFIX = "usr"
-
-        class User(BaseIDTableModelFactory(ID_PREFIX), table=True):
-            email: str = Field(unique=True, index=True)
-            full_name: str | None = None
-        ```
+        class User(UserBase, BaseIDTableModelFactory("usr"), table=True):
+            __tablename__ = "users"
     """
     IDTableMixin = IDTableModelMixinFactory(prefix)
 
@@ -139,11 +83,3 @@ def BaseIDTableModelFactory(prefix: str) -> type[BaseObjectIdSQLModel]:
         pass
 
     return BaseIDSQLModel  # pyright: ignore[reportReturnType]
-
-
-class BaseRead(SQLModel):
-    """Base read schema with id and timestamps."""
-
-    id: str
-    created_at: DatetimeSerializeAsUTC
-    updated_at: DatetimeSerializeAsUTC

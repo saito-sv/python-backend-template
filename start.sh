@@ -1,18 +1,23 @@
 #!/bin/bash
+set -euo pipefail
 
-uv run python -m app.database.wait
+APP_HOST="${APP_HOST:-0.0.0.0}"
+APP_PORT="${APP_PORT:-8000}"
 
-if [ "$RUN_MIGRATIONS_ON_STARTUP" = "true" ]; then
+uv run --frozen --no-dev python -m app.database.wait
+
+if [ "${RUN_MIGRATIONS_ON_STARTUP:-true}" = "true" ]; then
   echo "Running migrations on startup"
-  uv run python -m alembic upgrade head
+  export GOOSE_DBSTRING="$(uv run --frozen --no-dev python migrations/env.py)"
+  goose -dir migrations postgres up
 else
   echo "Not running migrations on startup"
 fi
 
-if [ "$ENVIRONMENT" != "production" ]; then
-  echo "Starting application with hot reloading enabled"
-  uv run python -m uvicorn app.app:app --port 8000 --host 0.0.0.0 --reload --proxy-headers --forwarded-allow-ips='*'
+if [ "${APP_ENVIRONMENT:-development}" != "production" ]; then
+  echo "Starting application with hot reloading enabled on ${APP_HOST}:${APP_PORT}"
+  exec uv run --frozen python -m uvicorn app.app:app --host "$APP_HOST" --port "$APP_PORT" --reload --proxy-headers --forwarded-allow-ips='*'
 else
-  echo "Starting application with production environment"
-  uv run python -m uvicorn app.app:app --port 8000 --host 0.0.0.0 --proxy-headers --forwarded-allow-ips='*'
+  echo "Starting application in production mode on ${APP_HOST}:${APP_PORT}"
+  exec uv run --frozen --no-dev python -m uvicorn app.app:app --host "$APP_HOST" --port "$APP_PORT" --proxy-headers --forwarded-allow-ips='*'
 fi

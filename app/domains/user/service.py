@@ -1,86 +1,72 @@
-"""User service with business logic."""
+"""User domain service."""
 
-from dataclasses import dataclass
-
+import bcrypt
 from antidote import inject, injectable
-from passlib.context import CryptContext
 
-from app.domains.user.models import UserCreate, UserRead, UserUpdate
-from app.domains.user.repository import UserRepository
-from app.domains.user.schemas import UserCreate as ApiUserCreate
-from app.domains.user.schemas import UserUpdate as ApiUserUpdate
+from app.exc import EntityExistsException
+from app.utils.schemas import CursorPage, CursorParams
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from .models import UserDBCreate, UserDBUpdate
+from .repository import UserRepository
+from .schemas import UserCreate, UserRead, UserUpdate
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed_password.encode())
 
 
 @injectable
-@dataclass
 class UserService:
-    """Service for user business logic with dependency injection."""
+    @inject
+    def __init__(self, user_repo: UserRepository = inject.me()) -> None:
+        self._user_repo = user_repo
 
-    repository: UserRepository = inject.me()
-
-    def _hash_password(self, password: str) -> str:
-        """Hash a password."""
-        return pwd_context.hash(password)
-
-    def _verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify a password."""
-        return pwd_context.verify(plain_password, hashed_password)
-
-    async def create_user(self, user_data: ApiUserCreate) -> UserRead:
-        """Create a new user."""
-        existing_user = await self.repository.get_one(self.repository.email_filter(user_data.email))
-        if existing_user:
-            raise ValueError(f"User with email {user_data.email} already exists")
-
-        repo_user = UserCreate(
-            email=user_data.email,
-            full_name=user_data.full_name,
-            hashed_password=self._hash_password(user_data.password),
+    async def create_user(self, data: UserCreate) -> UserRead:
+        existing = await self._user_repo.get_one(UserRepository.email_filter(data.email))
+        if existing is not None:
+            raise EntityExistsException(f"User with email {data.email} already exists")
+        return await self._user_repo.create(
+            UserDBCreate(
+                email=data.email,
+                full_name=data.full_name,
+                hashed_password=hash_password(data.password),
+            )
         )
-        return await self.repository.create(repo_user)
 
-    async def get_user(self, user_id: str) -> UserRead | None:
-        """Get user by ID."""
-        return await self.repository.get_by_id(user_id)
+    async def get_user(self, user_id: str) -> UserRead:
+        return await self._user_repo.get_by_id_or_raise(user_id)
 
     async def get_user_by_email(self, email: str) -> UserRead | None:
-        """Get user by email."""
-        return await self.repository.get_one(self.repository.email_filter(email))
+        return await self._user_repo.get_one(UserRepository.email_filter(email))
 
-    async def get_users(self, skip: int = 0, limit: int = 100) -> list[UserRead]:
-        """Get all users with pagination."""
-        return await self.repository.get_all(limit=limit, offset=skip)
-
-    async def update_user(self, user_id: str, user_data: ApiUserUpdate) -> UserRead | None:
-        """Update a user."""
-        user = await self.repository.get_by_id(user_id)
-        if not user:
-            return None
-
-        update_data = UserUpdate(
-            email=user_data.email,
-            full_name=user_data.full_name,
-            hashed_password=self._hash_password(user_data.password) if user_data.password else None,
-            is_active=user_data.is_active,
+    async def list_users(self, params: CursorParams) -> CursorPage[UserRead]:
+        return await self._user_repo.paginate(
+            cursor=params.cursor, limit=params.limit, order=params.order
         )
-        return await self.repository.update_by_id(update_data, user_id)
 
-    async def delete_user(self, user_id: str) -> bool:
-        """Delete a user."""
-        user = await self.repository.get_by_id(user_id)
-        if not user:
-            return False
+    async def list_inactive_users(self) -> list[UserRead]:
+        return await self._user_repo.get_all(UserRepository.is_active_filter(False))
 
-        await self.repository.delete_by_id(user_id)
-        return True
+    async def update_user(self, user_id: str, data: UserUpdate) -> UserRead:
+        values = data.model_dump(exclude_unset=True)
+        password = values.pop("password", None)
+        if password is not None:
+            values["hashed_password"] = hash_password(password)
+        return await self._user_repo.update_by_id(UserDBUpdate(**values), user_id)
+
+    async def delete_user(self, user_id: str) -> None:
+        """Soft delete."""
+        await self._user_repo.delete_by_id(user_id)
 
     async def authenticate(self, email: str, password: str) -> UserRead | None:
-        """Authenticate a user."""
-        user = await self.repository.get_one(self.repository.email_filter(email))
-        if not user:
+        result = await self._user_repo.get_with_password_hash(email)
+        if result is None:
             return None
-        if not self._verify_password(password, user.hashed_password):
+        user, hashed_password = result
+        if not user.is_active or not verify_password(password, hashed_password):
             return None
         return user

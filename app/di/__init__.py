@@ -1,1 +1,3 @@
-from .hidden_inject import hidden_inject  # noqa: F401
+from .hidden_inject import hidden_inject
+
+__all__ = ["hidden_inject"]

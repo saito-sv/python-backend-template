@@ -1,51 +1,37 @@
-"""Script that checks and waits for db to be available."""
+"""Wait until Postgres accepts connections (``python -m app.database.wait``)."""
 
 import asyncio
-import time
 
-import sqlalchemy
 import sqlalchemy.exc
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
 async def check_db_availability(
-    db_url: str, db_name: str = "Database", total_wait_time: int = 20, sleep_time: int = 1
+    db_url: str, db_name: str = "Database", total_wait_time: int = 120, sleep_time: int = 2
 ) -> None:
-    """Check if database is available and wait if not.
-
-    Args:
-        db_url: Database connection URL
-        db_name: Name of database for logging
-        total_wait_time: Maximum time to wait in seconds
-        sleep_time: Time to sleep between checks in seconds
-
-    Raises:
-        ConnectionError: If database is not available after total_wait_time
-    """
-    while total_wait_time > 0:
-        try:
-            engine = create_async_engine(db_url)
-            async with engine.begin() as conn:
-                result = await conn.execute(text("SELECT 1"))
-                success = result.fetchall()
-            await engine.dispose()
-            if success:
+    engine = create_async_engine(db_url)
+    try:
+        while total_wait_time > 0:
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text("SELECT 1"))
                 print(f"{db_name} is ready, continuing app start...")
-                break
-        except (sqlalchemy.exc.OperationalError, ConnectionRefusedError):
-            print(f"Waiting for {db_name} to be available...")
-            time.sleep(sleep_time)
-            total_wait_time -= sleep_time
+                return
+            except (sqlalchemy.exc.OperationalError, OSError, TimeoutError) as e:
+                print(f"Waiting for {db_name} to be available... ({type(e).__name__}: {e})")
+                await asyncio.sleep(sleep_time)
+                total_wait_time -= sleep_time
+    finally:
+        await engine.dispose()
 
-    if total_wait_time <= 0:
-        raise ConnectionError(
-            f"Timed out while waiting to connect to the {db_name}. "
-            "Please inspect the db logs for more information."
-        )
+    raise ConnectionError(
+        f"Timed out while waiting to connect to the {db_name}. "
+        "Please inspect the db logs for more information."
+    )
 
 
 if __name__ == "__main__":
-    from settings.config import settings
+    from app.config import load
 
-    asyncio.run(check_db_availability(str(settings.database_url), db_name="Database"))
+    asyncio.run(check_db_availability(load("database").database.url))
